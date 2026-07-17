@@ -1,0 +1,80 @@
+# Colour Mixer — macOS arm64 build
+#
+# Produces one arm64 "Colour Mixer.app" (Apple Silicon only), zipped with
+# ditto to preserve bundle metadata, uploaded as a workflow artifact.
+# Runner: macos-15 (arm64); native-arch build via actions/setup-python.
+
+name: build-macos
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "mac-v*"
+
+env:
+  PYTHON_VERSION: "3.13"
+  HTML_SOURCE: "2026-07-17_colour_mixer_v3.html"   # canonical HTML at repo root
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create venv and install dependencies
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -r mac/requirements.txt
+          ./.venv/bin/pip list
+
+      - name: Prepare build sources (patch HTML, vendor three.min.js)
+        run: ./.venv/bin/python mac/prepare_build.py "${HTML_SOURCE}"
+
+      - name: Build .app (PyInstaller, arm64)
+        working-directory: mac
+        run: ../.venv/bin/pyinstaller --noconfirm colourmixer.spec
+
+      - name: Assert app binary is arm64
+        run: |
+          set -euo pipefail
+          BIN="mac/dist/Colour Mixer.app/Contents/MacOS/colourmixer"
+          ARCHS=$(lipo -archs "$BIN")
+          echo "App binary archs: $ARCHS"
+          case "$ARCHS" in
+            *arm64*) ;;
+            *) echo "::error::App binary is not arm64"; exit 1 ;;
+          esac
+
+      - name: Smoke-check bundle contents
+        run: |
+          set -euo pipefail
+          APP="mac/dist/Colour Mixer.app"
+          test -f "$APP/Contents/MacOS/colourmixer"
+          RES=$(find "$APP" -name index.html | head -1)
+          test -n "$RES"
+          test -n "$(find "$APP" -name three.min.js | head -1)"
+          ! grep -q "cdnjs.cloudflare.com" "$RES"   # offline: no CDN reference
+          echo "bundle contents OK"
+
+      - name: Zip with ditto (preserves bundle metadata)
+        run: |
+          set -euo pipefail
+          cd mac/dist
+          ditto -c -k --keepParent "Colour Mixer.app" "ColourMixer-macos-arm64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ColourMixer-macos-arm64
+          path: mac/dist/ColourMixer-macos-arm64.zip
+          if-no-files-found: error
